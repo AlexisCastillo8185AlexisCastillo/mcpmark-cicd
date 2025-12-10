@@ -1,0 +1,243 @@
+name: Pull Request Automation
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  code-quality:
+    name: code-quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint checks
+        id: eslint
+        run: |
+          eslint_output=$(npm run lint 2>&1)
+          echo "eslint_output<<EOF" >> $GITHUB_OUTPUT
+          echo "$eslint_output" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Run Prettier formatting checks
+        id: prettier
+        run: |
+          prettier_output=$(npx prettier --check . 2>&1)
+          echo "prettier_output<<EOF" >> $GITHUB_OUTPUT
+          echo "$prettier_output" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Post Code Quality Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const commentBody = `
+## Code Quality Report
+### ESLint Results:
+\`\`\`
+${process.env.ESLINT_OUTPUT}
+\`\`\`
+
+### Prettier Results:
+\`\`\`
+${process.env.PRETTIER_OUTPUT}
+\`\`\`
+`;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
+        env:
+          ESLINT_OUTPUT: ${{ steps.eslint.outputs.eslint_output }}
+          PRETTIER_OUTPUT: ${{ steps.prettier.outputs.prettier_output }}
+
+  testing-suite:
+    name: testing-suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run test suite with coverage
+        id: tests
+        run: |
+          test_output=$(npm test -- --coverage 2>&1)
+          echo "test_output<<EOF" >> $GITHUB_OUTPUT
+          echo "$test_output" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+      - name: Post Test Coverage Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const commentBody = `
+## Test Coverage Report
+\`\`\`
+${process.env.TEST_OUTPUT}
+\`\`\`
+`;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
+        env:
+          TEST_OUTPUT: ${{ steps.tests.outputs.test_output }}
+
+  security-scan:
+    name: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run dependency vulnerability check
+        id: npm-audit
+        run: |
+          audit_output=$(npm audit 2>&1)
+          echo "audit_output<<EOF" >> $GITHUB_OUTPUT
+          echo "$audit_output" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Scan for secrets in code changes
+        id: secret-scan
+        uses: trufflesecurity/trufflehog@v3.65.0
+        with:
+          path: .
+          base: ${{ github.event.pull_request.base.sha }}
+          head: ${{ github.event.pull_request.head.sha }}
+          format: text
+        continue-on-error: true
+
+      - name: Post Security Scan Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const commentBody = `
+## Security Scan Report
+### Dependencies Vulnerabilities:
+\`\`\`
+${process.env.AUDIT_OUTPUT}
+\`\`\`
+
+### Secret Scan Results:
+\`\`\`
+${process.env.SECRET_SCAN_OUTPUT || "No secrets detected in code changes."}
+\`\`\`
+`;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
+        env:
+          AUDIT_OUTPUT: ${{ steps.npm-audit.outputs.audit_output }}
+          SECRET_SCAN_OUTPUT: ${{ steps.secret-scan.outputs.stdout }}
+
+  build-validation:
+    name: build-validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        id: build
+        run: |
+          build_output=$(npm run build 2>&1)
+          echo "build_output<<EOF" >> $GITHUB_OUTPUT
+          echo "$build_output" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Validate endpoints (application health check)
+        id: endpoint-check
+        run: |
+          # Start application in background
+          npm start &
+          # Wait for application to initialize
+          sleep 8
+          # Check default endpoint (adjust port/path as needed for your app)
+          endpoint_output=$(curl -s http://localhost:3000 || echo "Endpoint validation failed: Application not reachable")
+          echo "endpoint_output<<EOF" >> $GITHUB_OUTPUT
+          echo "$endpoint_output" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          # Stop background application
+          pkill -f "npm start"
+
+      - name: Upload deployment preview artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: dist/
+
+      - name: Post Build Validation Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const commentBody = `
+## Build Validation
+### Build Status:
+\`\`\`
+${process.env.BUILD_OUTPUT}
+\`\`\`
+
+### Endpoint Validation:
+\`\`\`
+${process.env.ENDPOINT_OUTPUT}
+\`\`\`
+`;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
+        env:
+          BUILD_OUTPUT: ${{ steps.build.outputs.build_output }}
+          ENDPOINT_OUTPUT: ${{ steps.endpoint-check.outputs.endpoint_output }}
